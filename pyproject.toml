@@ -3,7 +3,7 @@
 
 [project]
 name = "awkit-ci"
-version = "0.0.0"
+version = "0.1.0"
 description = "Shared reusable GitHub Actions workflows and caller templates for agent-workflow-kit."
 license = "MIT"
 
