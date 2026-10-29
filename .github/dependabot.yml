@@ -1,0 +1,15 @@
+# awkit-ci's own action pins. These use `chore(deps)` (not `ci(deps)`) because the
+# pins are what awkit-ci ships: each bump releases a patch that callers then pick up.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: chore(deps)
+    groups:
+      all:
+        patterns: ["*"]

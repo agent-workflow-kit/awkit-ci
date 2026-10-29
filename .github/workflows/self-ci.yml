@@ -1,0 +1,36 @@
+name: ci
+
+# awkit-ci's own CI: dogfoods docs-ci.yml from this commit (markdown lint, links,
+# shellcheck on scripts/, actionlint and zizmor on .github/ and templates/), then
+# releases awkit-ci itself on pushes to main once CI passed (release.yml: tag,
+# changelog and GitHub Release; no build artifacts). Callers pick up new tags via
+# Dependabot. Required status check: `ci / ci-ok`.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    uses: ./.github/workflows/docs-ci.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the newer $/ syntax
+    with:
+      extra-workflow-files: templates/ci.yml templates/pr-title.yml templates/scorecard.yml templates/awkit-docs/ci.yml
+
+  release:
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # The release pushes with the release GitHub App token, so GITHUB_TOKEN stays read-only.
+    permissions:
+      contents: read
+    uses: ./.github/workflows/release.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the newer $/ syntax
+    secrets:
+      app-id: ${{ secrets.RELEASE_APP_ID }}
+      app-private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}

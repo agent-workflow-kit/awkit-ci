@@ -1,0 +1,48 @@
+# awkit-ci is not a Python package. This file only carries the version and the
+# python-semantic-release configuration used by the release job in .github/workflows/self-ci.yml.
+
+[project]
+name = "awkit-ci"
+version = "0.0.0"
+description = "Shared reusable GitHub Actions workflows and caller templates for agent-workflow-kit."
+license = "MIT"
+
+[tool.semantic_release]
+version_toml = ["pyproject.toml:project.version"]
+commit_parser = "conventional"
+allow_zero_version = true
+major_on_zero = false
+tag_format = "v{version}"
+commit_message = "chore(release): v{version}"
+# Nothing to build: releases are a tag, a changelog entry and a GitHub Release.
+build_command = ""
+
+[tool.semantic_release.commit_parser_options]
+minor_tags = ["feat"]
+patch_tags = ["fix", "perf", "chore", "refactor", "build"]
+other_allowed_tags = ["docs", "test", "ci", "style"]
+# Only the squash commit's title (the PR title) decides the bump and the changelog line.
+parse_squash_commits = false
+
+[tool.semantic_release.changelog]
+mode = "update"
+insertion_flag = "<!-- version list -->"
+# Custom template: one line per commit (its title), lint-clean markdown. Also keeps PSR
+# away from its default template_dir "templates", which here holds the caller templates.
+template_dir = ".psr-templates"
+exclude_commit_patterns = ['''^chore\(release\):''']
+
+[tool.semantic_release.changelog.default_templates]
+changelog_file = "CHANGELOG.md"
+output_format = "md"
+
+[tool.semantic_release.branches.main]
+match = "main"
+prerelease = false
+
+[tool.semantic_release.remote]
+type = "github"
+
+[tool.semantic_release.publish]
+dist_glob_patterns = []
+upload_to_vcs_release = false

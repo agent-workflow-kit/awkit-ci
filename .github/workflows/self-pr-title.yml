@@ -1,0 +1,16 @@
+name: pr-title
+
+# Required status check: `pr-title / pr-title`.
+
+on:
+  # Needed so the check also runs for PRs from forks. The called workflow only reads
+  # the PR title through the API; it never checks out or executes PR code.
+  pull_request_target: # zizmor: ignore[dangerous-triggers] title lint only, no checkout
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  pull-requests: read # read the PR title
+
+jobs:
+  pr-title:
+    uses: ./.github/workflows/pr-title.yml # zizmor: ignore[self-repository] actionlint 1.7.12 rejects the newer $/ syntax

@@ -1,0 +1,194 @@
+name: docs-ci
+
+# Reusable CI for documentation repos (awkit-docs) and for awkit-ci itself.
+# Callers: see templates/awkit-docs/ci.yml. The single required status check is `ci / ci-ok`.
+
+on:
+  workflow_call:
+    inputs:
+      link-excludes:
+        description: >-
+          Newline-separated lychee exclude regexes. Relative links that leave the
+          repository (for example `../forgectl/...`) are always skipped.
+        type: string
+        default: |
+          ^https?://(localhost|127\.0\.0\.1|\[::1\])([:/]|$)
+          ^https://github\.com/agent-workflow-kit/
+      extra-workflow-files:
+        description: >-
+          Space-separated extra workflow files (globs allowed) to run actionlint and
+          zizmor on, in addition to .github/ (awkit-ci uses this for templates/).
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  markdown:
+    name: markdown
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: pymarkdown
+        env:
+          PYMARKDOWNLNT: pymarkdownlnt==0.9.41
+        run: |
+          set -euo pipefail
+          if [ ! -f .pymarkdown.json ]; then
+            echo "::error::.pymarkdown.json is missing; copy it from agent-workflow-kit/awkit-ci"
+            exit 1
+          fi
+          uvx --from "$PYMARKDOWNLNT" pymarkdown --config .pymarkdown.json scan -r .
+
+  links:
+    name: links
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Prepare lychee excludes
+        id: prep
+        env:
+          LINK_EXCLUDES: ${{ inputs.link-excludes }}
+        run: |
+          set -euo pipefail
+          # lychee reads .lycheeignore (one regex per line) from the working directory.
+          printf '\n%s\n' "$LINK_EXCLUDES" | sed '/^[[:space:]]*$/d' >> .lycheeignore
+          # Only file:// links inside this checkout are checked; links that leave it
+          # (relative links to sibling repos) are skipped.
+          ws_re=$(printf '%s' "$GITHUB_WORKSPACE" | sed 's/[][\.*^$+?(){}|]/\\&/g')
+          echo "include=^file://${ws_re}/" >> "$GITHUB_OUTPUT"
+      - uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          failIfEmpty: false
+          args: >-
+            --no-progress
+            --max-retries 3
+            --accept '100..=103,200..=299,429'
+            --root-dir '${{ github.workspace }}'
+            --include '${{ steps.prep.outputs.include }}'
+            --exclude '^file://'
+            './**/*.md'
+
+  shell-lint:
+    name: shell-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: shellcheck
+        env:
+          SHELLCHECK: shellcheck-py==0.11.0.1
+        run: |
+          set -euo pipefail
+          # *.sh files plus any file under scripts/ with a sh/bash shebang.
+          files=()
+          while IFS= read -r -d '' f; do
+            case "$f" in
+              *.sh) files+=("$f") ;;
+              scripts/*) if head -n1 "$f" | grep -Eq '^#!.*[/ ](ba)?sh([[:space:]]|$)'; then files+=("$f"); fi ;;
+            esac
+          done < <(git ls-files -z)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::notice::no shell scripts found"
+            exit 0
+          fi
+          printf 'shellcheck: %s\n' "${files[@]}"
+          uvx --from "$SHELLCHECK" shellcheck "${files[@]}"
+
+  workflow-lint:
+    name: workflow-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          archive="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${archive}"
+          echo "${ACTIONLINT_SHA256}  $RUNNER_TEMP/$archive" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" actionlint
+      - name: actionlint
+        env:
+          EXTRA_WORKFLOW_FILES: ${{ inputs.extra-workflow-files }}
+        run: |
+          set -euo pipefail
+          if [ -d .github/workflows ]; then
+            "$RUNNER_TEMP/actionlint" -color
+          else
+            echo "::notice::no .github/workflows directory"
+          fi
+          if [ -n "$EXTRA_WORKFLOW_FILES" ]; then
+            # Word splitting and globbing of the list are intended.
+            # shellcheck disable=SC2086
+            "$RUNNER_TEMP/actionlint" -color $EXTRA_WORKFLOW_FILES
+          fi
+      - name: zizmor
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ZIZMOR: zizmor==1.31.1
+          EXTRA_WORKFLOW_FILES: ${{ inputs.extra-workflow-files }}
+        run: |
+          set -euo pipefail
+          config=()
+          if [ ! -f .github/zizmor.yml ] && [ ! -f zizmor.yml ]; then
+            # Default policy: awkit-ci reusable workflows are referenced by release tag
+            # (Dependabot bumps them); every other action must be pinned by commit SHA.
+            printf '%s\n' \
+              'rules:' \
+              '  unpinned-uses:' \
+              '    config:' \
+              '      policies:' \
+              '        "agent-workflow-kit/*": ref-pin' \
+              '        "*": hash-pin' > "$RUNNER_TEMP/zizmor.yml"
+            config=(--config "$RUNNER_TEMP/zizmor.yml")
+          fi
+          # Word splitting and globbing of the list are intended.
+          # shellcheck disable=SC2086
+          uvx "$ZIZMOR" --format=github "${config[@]}" . $EXTRA_WORKFLOW_FILES
+
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [markdown, links, shell-lint, workflow-lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: Check job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if echo "$NEEDS" | jq -e 'any(.[]; .result == "failure" or .result == "cancelled")' > /dev/null; then
+            echo "::error::one or more required jobs failed or were cancelled"
+            exit 1
+          fi

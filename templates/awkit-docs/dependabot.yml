@@ -1,0 +1,16 @@
+# Dependabot version updates for awkit-docs (weekly, one grouped PR).
+# Action bumps, including the awkit-ci reusable-workflow tags, use `ci(deps)` (no release).
+# Source: https://github.com/agent-workflow-kit/awkit-ci/tree/main/templates
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci(deps)
+    groups:
+      all:
+        patterns: ["*"]

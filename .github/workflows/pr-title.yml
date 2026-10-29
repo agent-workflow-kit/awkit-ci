@@ -1,0 +1,37 @@
+name: pr-title
+
+# Reusable PR-title check: the PR title must be a Conventional Commit header, because
+# it becomes the squash commit, the version bump and the changelog line.
+# Callers: see templates/pr-title.yml. Required status check: `pr-title / pr-title`.
+# Safe under pull_request_target: it never checks out or runs PR code.
+
+on:
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  pr-title:
+    name: pr-title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read # read the PR title
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            chore
+            refactor
+            build
+            docs
+            test
+            ci
+            style
+          requireScope: false
+          wip: false

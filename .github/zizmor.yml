@@ -1,0 +1,9 @@
+# Same policy docs-ci.yml / python-ci.yml apply when a repo has no zizmor config:
+# awkit-ci reusable workflows are referenced by release tag (Dependabot bumps them);
+# every other action must be pinned by full commit SHA.
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        "agent-workflow-kit/*": ref-pin
+        "*": hash-pin

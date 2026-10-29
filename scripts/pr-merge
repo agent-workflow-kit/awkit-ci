@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+# pr-merge: guard-check, wait for checks, then squash-merge a pull request.
+#
+# Usage: pr-merge <repo-dir | owner/repo> <pr-number>
+#
+# Steps:
+#   1. Resolve owner/repo (from a local clone/worktree directory, or given directly).
+#   2. Run the local private-content guard: `guard pr <owner/repo> <pr>`.
+#      The guard is taken from $AWKIT_GUARD if set, else `guard` on PATH.
+#      A configured guard that fails or is missing stops the merge (fail closed);
+#      with no guard installed at all, a warning is printed and the merge continues.
+#   3. Wait for all checks: `gh pr checks <pr> --watch --fail-fast`.
+#   4. Squash-merge and delete the head branch: `gh pr merge <pr> --squash --delete-branch`
+#      (never --admin). The merge only happens if the PR head is still the commit the
+#      guard checked.
+#
+# Exit status: 0 on merge; 1 on any failure; 2 on usage errors.
+
+set -euo pipefail
+
+prog="pr-merge"
+
+usage() {
+  echo "usage: $prog <repo-dir | owner/repo> <pr-number>" >&2
+  exit 2
+}
+
+die() {
+  echo "$prog: error: $*" >&2
+  exit 1
+}
+
+warn() {
+  echo "$prog: warning: $*" >&2
+}
+
+[ "$#" -eq 2 ] || usage
+target=$1
+pr=$2
+
+[[ "$pr" =~ ^[1-9][0-9]*$ ]] || die "PR number must be a positive integer, got '$pr'"
+command -v gh > /dev/null 2>&1 || die "gh (GitHub CLI) is not installed; see https://cli.github.com"
+
+# 1. Resolve owner/repo.
+if [ -d "$target" ]; then
+  repo=$(cd "$target" && gh repo view --json nameWithOwner --jq .nameWithOwner) ||
+    die "could not resolve owner/repo from directory '$target' (is it a clone with a GitHub remote?)"
+elif [[ "$target" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+  repo=$target
+else
+  die "'$target' is neither a directory nor an owner/repo name"
+fi
+
+head_sha=$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid) ||
+  die "could not read PR #$pr in $repo"
+echo "$prog: $repo#$pr at ${head_sha}"
+
+# 2. Private-content guard (local only; see architecture section 18.7).
+guard_cmd=""
+if [ -n "${AWKIT_GUARD:-}" ]; then
+  if [ -x "$AWKIT_GUARD" ] || command -v "$AWKIT_GUARD" > /dev/null 2>&1; then
+    guard_cmd=$AWKIT_GUARD
+  else
+    die "AWKIT_GUARD is set to '$AWKIT_GUARD' but it is not an executable; refusing to merge"
+  fi
+elif command -v guard > /dev/null 2>&1; then
+  guard_cmd=guard
+fi
+
+if [ -n "$guard_cmd" ]; then
+  echo "$prog: running guard: $guard_cmd pr $repo $pr"
+  "$guard_cmd" pr "$repo" "$pr" || die "private-content guard failed for $repo#$pr; not merging"
+else
+  warn "no private-content guard installed (set AWKIT_GUARD or put 'guard' on PATH); continuing without it"
+fi
+
+# 3. Wait for every check to pass.
+echo "$prog: waiting for checks on $repo#$pr"
+gh pr checks "$pr" --repo "$repo" --watch --fail-fast ||
+  die "checks did not pass for $repo#$pr (or none were reported); not merging"
+
+# 4. Squash-merge, only if the head is unchanged since the guard ran.
+echo "$prog: squash-merging $repo#$pr"
+gh pr merge "$pr" --repo "$repo" --squash --delete-branch --match-head-commit "$head_sha" ||
+  die "merge failed for $repo#$pr (head changed since the guard ran, or merge not allowed)"
+
+echo "$prog: merged $repo#$pr"
