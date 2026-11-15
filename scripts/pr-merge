@@ -9,6 +9,11 @@
 #      The guard is taken from $AWKIT_GUARD if set, else `guard` on PATH.
 #      A configured guard that fails or is missing stops the merge (fail closed);
 #      with no guard installed at all, a warning is printed and the merge continues.
+#      Exception: if `guard pr` fails only because GitHub refuses to serve the diff
+#      (over 20,000 lines: "diff exceeded the maximum number of lines"), scan locally
+#      instead: fetch the PR head, run `guard range <merge-base>..<head>` (added lines
+#      and commit messages) and `guard text` on the title and body. This needs a local
+#      clone as the target; any finding or error still stops the merge.
 #   3. Wait for all checks: `gh pr checks <pr> --watch --fail-fast`.
 #   4. Squash-merge and delete the head branch: `gh pr merge <pr> --squash --delete-branch`
 #      (never --admin). The merge only happens if the PR head is still the commit the
@@ -55,6 +60,36 @@ head_sha=$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid) |
   die "could not read PR #$pr in $repo"
 echo "$prog: $repo#$pr at ${head_sha}"
 
+# Fallback for PRs whose diff GitHub refuses to serve: scan the same content locally.
+# Fails closed: any missing prerequisite, finding or guard error stops the merge.
+large_diff_guard() {
+  [ -d "$target" ] ||
+    die "the diff of $repo#$pr is too large for GitHub, and the local scan needs a local clone (pass a directory, not owner/repo); not merging"
+  local base base_ref pr_ref fetched merge_base
+  base=$(gh pr view "$pr" --repo "$repo" --json baseRefName --jq .baseRefName) ||
+    die "could not read the base branch of $repo#$pr; not merging"
+  [ -n "$base" ] || die "empty base branch for $repo#$pr; not merging"
+  base_ref=refs/remotes/origin/$base
+  pr_ref=refs/remotes/origin/pr/$pr
+  git -C "$target" fetch --quiet --no-tags origin "+refs/heads/$base:$base_ref" "+refs/pull/$pr/head:$pr_ref" ||
+    die "could not fetch '$base' and the head of $repo#$pr from origin; not merging"
+  # The fetched PR head must be the commit that will be merged.
+  fetched=$(git -C "$target" rev-parse --verify --quiet "$pr_ref^{commit}") ||
+    die "could not resolve the fetched head of $repo#$pr; not merging"
+  [ "$fetched" = "$head_sha" ] || die "fetched head $fetched does not match PR head $head_sha; not merging"
+  merge_base=$(git -C "$target" merge-base "$base_ref" "$head_sha") ||
+    die "no merge base between origin/$base and $head_sha; not merging"
+
+  echo "$prog: running guard: $guard_cmd range $merge_base..$head_sha"
+  (cd "$target" && "$guard_cmd" range "$merge_base..$head_sha") ||
+    die "private-content guard failed on the commits of $repo#$pr; not merging"
+
+  echo "$prog: running guard: $guard_cmd text - (title and body)"
+  gh pr view "$pr" --repo "$repo" --json title,body --jq '.title + "\n\n" + (.body // "")' |
+    "$guard_cmd" text - ||
+    die "private-content guard failed on the title or body of $repo#$pr; not merging"
+}
+
 # 2. Private-content guard (local only; see architecture section 18.7).
 guard_cmd=""
 if [ -n "${AWKIT_GUARD:-}" ]; then
@@ -69,7 +104,20 @@ fi
 
 if [ -n "$guard_cmd" ]; then
   echo "$prog: running guard: $guard_cmd pr $repo $pr"
-  "$guard_cmd" pr "$repo" "$pr" || die "private-content guard failed for $repo#$pr; not merging"
+  guard_out=$(mktemp)
+  trap 'rm -f "$guard_out"' EXIT
+  if "$guard_cmd" pr "$repo" "$pr" 2> "$guard_out"; then
+    cat "$guard_out" >&2
+    echo "$prog: guard route: guard pr"
+  else
+    cat "$guard_out" >&2
+    # Only GitHub's "diff too large" refusal (HTTP 406) allows the local fallback;
+    # every other failure stays fatal.
+    grep -qi 'diff exceeded the maximum number of lines' "$guard_out" ||
+      die "private-content guard failed for $repo#$pr; not merging"
+    echo "$prog: guard route: large-diff fallback (guard range + guard text)"
+    large_diff_guard
+  fi
 else
   warn "no private-content guard installed (set AWKIT_GUARD or put 'guard' on PATH); continuing without it"
 fi

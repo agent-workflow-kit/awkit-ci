@@ -11,9 +11,9 @@ TEMPLATE_WORKFLOWS := templates/ci.yml templates/pr-title.yml templates/scorecar
 DEPENDABOT_FILES   := .github/dependabot.yml templates/dependabot.yml templates/awkit-docs/dependabot.yml
 ZIZMOR_CONFIG      := .github/zizmor.yml
 
-.PHONY: verify actionlint zizmor mdlint shellcheck schemas
+.PHONY: verify actionlint zizmor mdlint shellcheck schemas test
 
-verify: actionlint zizmor mdlint shellcheck schemas
+verify: actionlint zizmor mdlint shellcheck schemas test
 
 actionlint:
 	$(ACTIONLINT) -color
@@ -26,7 +26,10 @@ mdlint:
 	$(PYMARKDOWN) --config .pymarkdown.json scan -r .
 
 shellcheck:
-	$(SHELLCHECK) scripts/pr-merge
+	$(SHELLCHECK) scripts/pr-merge tests/pr-merge-test.sh
+
+test:
+	tests/pr-merge-test.sh
 
 schemas:
 	$(CHECK_JSONSCHEMA) --builtin-schema vendor.github-workflows .github/workflows/*.yml $(TEMPLATE_WORKFLOWS)
