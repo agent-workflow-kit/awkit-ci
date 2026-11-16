@@ -96,7 +96,9 @@ large_diff_guard() {
   local git_dir
   git_dir=$(git -C "$target" rev-parse --absolute-git-dir) ||
     die "could not locate the git directory of '$target'; not merging"
-  scan_dir=$(mktemp -d)
+  scan_dir=$(mktemp -d) || die "could not create a temporary directory; not merging"
+  # mktemp honors a relative TMPDIR; the scan runs after a cd, so make it absolute.
+  scan_dir=$(cd "$scan_dir" && pwd -P) || die "could not resolve the temporary directory; not merging"
   echo "$prog: running guard: $guard_cmd range $merge_base..$head_sha"
   (cd "$scan_dir" &&
     GIT_DIR=$git_dir GIT_WORK_TREE=$scan_dir GIT_INDEX_FILE=$scan_dir/idx \
@@ -117,7 +119,11 @@ if [ -n "${AWKIT_GUARD:-}" ]; then
     # Make a relative path absolute now: the guard also runs after a cd.
     case $guard_cmd in
       */*) ;;
-      *) guard_cmd=$(command -v "$guard_cmd") ;;
+      *)
+        p=$(command -v "$guard_cmd") || p=""
+        [ -n "$p" ] || die "AWKIT_GUARD '$AWKIT_GUARD' is not found on PATH; refusing to merge"
+        guard_cmd=$p
+        ;;
     esac
     case $guard_cmd in
       /*) ;;

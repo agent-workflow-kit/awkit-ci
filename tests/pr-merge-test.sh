@@ -172,6 +172,11 @@ range_isolated() {
   [ -n "$p" ] && [ "$p" = "$w" ] && [ "$i" = "$p/idx" ] && [ "$p" != "$work/clone" ] && [ ! -e "$p" ]
 }
 
+abs_scan_paths() {
+  case $(logval range-worktree) in /*) ;; *) return 1 ;; esac
+  case $(logval range-index) in /*) ;; *) return 1 ;; esac
+}
+
 # 1. guard pr succeeds: merge, no fallback.
 run "$work/clone"
 check "ok: exit 0" rc_is 0
@@ -293,6 +298,24 @@ run "$work/clone" FAKE_GUARD_PR=toolarge
 check "base advanced: exit 0" rc_is 0
 check "base advanced: range starts at old merge base" logged "guard range $base_sha..$head_sha"
 check "base advanced: new base tip not used" not_logged "$new_main"
+
+# 12. A bare AWKIT_GUARD that is executable only in the cwd (not on PATH) is a clear
+# error, not a guard path of "$PWD/".
+mkdir -p "$work/cwdonly"
+cp "$work/bin/guard" "$work/cwdonly/cwdguard"
+RUN_CWD="$work/cwdonly" run "$work/clone" FAKE_GUARD_PR=toolarge AWKIT_GUARD=cwdguard
+check "bare guard not on PATH: exit 1" rc_is 1
+check "bare guard not on PATH: clear error" said "not found on PATH"
+check "bare guard not on PATH: no guard run" not_logged "guard "
+check "bare guard not on PATH: not merged" not_logged "pr merge"
+
+# 12b. A relative TMPDIR still yields absolute scan paths and a working scan.
+mkdir -p "$work/reltmp"
+RUN_CWD="$work" run "$work/clone" FAKE_GUARD_PR=toolarge TMPDIR=reltmp
+check "relative TMPDIR: exit 0" rc_is 0
+check "relative TMPDIR: scan isolated" range_isolated
+check "relative TMPDIR: worktree path absolute" abs_scan_paths
+check "relative TMPDIR: scan saw the commits" logged "range-saw-added"
 
 # 11. Usage errors keep exit status 2.
 env PATH="$work/bin:$PATH" "$script" > "$out" 2>&1
