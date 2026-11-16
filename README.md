@@ -226,9 +226,11 @@ authenticated with permission to merge.
 
 `make verify` runs, through `uvx` at pinned versions: actionlint (with shellcheck) on
 `.github/workflows/` and `templates/`, zizmor (offline unless `GH_TOKEN` is set),
-pymarkdown, shellcheck on `scripts/` and `tests/`, the `pr-merge` tests (`tests/pr-merge-test.sh`, fake `gh` and `guard`, no network), and check-jsonschema on the workflows (GitHub
-workflow schema) and the Dependabot files (Dependabot schema). It needs only
-[uv](https://docs.astral.sh/uv/) and `make`.
+pymarkdown, shellcheck on `scripts/` and `tests/`, the `pr-merge` tests
+(`tests/pr-merge-test.sh`, fake `gh` and `guard`, no network), and check-jsonschema on
+the workflows (GitHub workflow schema) and the Dependabot files (Dependabot schema).
+It needs only [uv](https://docs.astral.sh/uv/) and `make`. The `pr-merge` tests run
+locally through `make verify` only; no workflow runs them.
 
 ## License
 

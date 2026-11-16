@@ -13,7 +13,10 @@
 #      (over 20,000 lines: "diff exceeded the maximum number of lines"), scan locally
 #      instead: fetch the PR head, run `guard range <merge-base>..<head>` (added lines
 #      and commit messages) and `guard text` on the title and body. This needs a local
-#      clone as the target; any finding or error still stops the merge.
+#      clone as the target; any finding or error still stops the merge. The fetched
+#      head must equal the head gh reports, and the scan is per commit (the range
+#      is read with an empty work tree and index, so no checked-out file, such as a
+#      .gitattributes, changes what is scanned).
 #   3. Wait for all checks: `gh pr checks <pr> --watch --fail-fast`.
 #   4. Squash-merge and delete the head branch: `gh pr merge <pr> --squash --delete-branch`
 #      (never --admin). The merge only happens if the PR head is still the commit the
@@ -60,6 +63,14 @@ head_sha=$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid) |
   die "could not read PR #$pr in $repo"
 echo "$prog: $repo#$pr at ${head_sha}"
 
+guard_out=""
+scan_dir=""
+cleanup() {
+  [ -z "$guard_out" ] || rm -f "$guard_out"
+  [ -z "$scan_dir" ] || rm -rf "$scan_dir"
+}
+trap cleanup EXIT
+
 # Fallback for PRs whose diff GitHub refuses to serve: scan the same content locally.
 # Fails closed: any missing prerequisite, finding or guard error stops the merge.
 large_diff_guard() {
@@ -80,8 +91,16 @@ large_diff_guard() {
   merge_base=$(git -C "$target" merge-base "$base_ref" "$head_sha") ||
     die "no merge base between origin/$base and $head_sha; not merging"
 
+  # Scan from an empty work tree so nothing PR-controlled (a checked-out
+  # .gitattributes, for one) can change what the guard sees.
+  local git_dir
+  git_dir=$(git -C "$target" rev-parse --absolute-git-dir) ||
+    die "could not locate the git directory of '$target'; not merging"
+  scan_dir=$(mktemp -d)
   echo "$prog: running guard: $guard_cmd range $merge_base..$head_sha"
-  (cd "$target" && "$guard_cmd" range "$merge_base..$head_sha") ||
+  (cd "$scan_dir" &&
+    GIT_DIR=$git_dir GIT_WORK_TREE=$scan_dir GIT_INDEX_FILE=$scan_dir/idx \
+      "$guard_cmd" range "$merge_base..$head_sha") ||
     die "private-content guard failed on the commits of $repo#$pr; not merging"
 
   echo "$prog: running guard: $guard_cmd text - (title and body)"
@@ -95,17 +114,29 @@ guard_cmd=""
 if [ -n "${AWKIT_GUARD:-}" ]; then
   if [ -x "$AWKIT_GUARD" ] || command -v "$AWKIT_GUARD" > /dev/null 2>&1; then
     guard_cmd=$AWKIT_GUARD
+    # Make a relative path absolute now: the guard also runs after a cd.
+    case $guard_cmd in
+      */*) ;;
+      *) guard_cmd=$(command -v "$guard_cmd") ;;
+    esac
+    case $guard_cmd in
+      /*) ;;
+      *) guard_cmd=$PWD/${guard_cmd#./} ;;
+    esac
   else
     die "AWKIT_GUARD is set to '$AWKIT_GUARD' but it is not an executable; refusing to merge"
   fi
 elif command -v guard > /dev/null 2>&1; then
-  guard_cmd=guard
+  guard_cmd=$(command -v guard)
+  case $guard_cmd in
+    /*) ;;
+    *) guard_cmd=$PWD/${guard_cmd#./} ;;
+  esac
 fi
 
 if [ -n "$guard_cmd" ]; then
   echo "$prog: running guard: $guard_cmd pr $repo $pr"
   guard_out=$(mktemp)
-  trap 'rm -f "$guard_out"' EXIT
   if "$guard_cmd" pr "$repo" "$pr" 2> "$guard_out"; then
     cat "$guard_out" >&2
     echo "$prog: guard route: guard pr"
