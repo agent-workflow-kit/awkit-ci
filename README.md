@@ -208,7 +208,13 @@ scripts/pr-merge <repo-dir | owner/repo> <pr-number>
    `$AWKIT_GUARD` if set, else `guard` on `PATH`. If a guard is configured and fails
    (or `$AWKIT_GUARD` does not point at an executable) it stops. If none is installed it
    warns and continues. Prefer `AWKIT_GUARD`, since an unrelated program called `guard`
-   may be on `PATH`.
+   may be on `PATH`. If `guard pr` fails only because GitHub refuses to serve a diff of
+   more than 20,000 lines (the error says "diff exceeded the maximum number of lines"),
+   it scans locally instead: fetches the PR head and base branch from `origin`, runs
+   `guard range <merge-base>..<head>` (added lines and commit messages) and `guard text`
+   on the title and body. This needs a local clone or worktree as the target (with
+   `owner/repo` it refuses), and the fetched head must be the commit gh reports. Any
+   finding or other error still stops the merge, and the output says which route ran.
 3. Waits for every check: `gh pr checks <pr> --watch --fail-fast`.
 4. Squash-merges and deletes the branch: `gh pr merge <pr> --squash --delete-branch`,
    only if the PR head is still the commit the guard checked. It never uses `--admin`.
@@ -220,9 +226,11 @@ authenticated with permission to merge.
 
 `make verify` runs, through `uvx` at pinned versions: actionlint (with shellcheck) on
 `.github/workflows/` and `templates/`, zizmor (offline unless `GH_TOKEN` is set),
-pymarkdown, shellcheck on `scripts/`, and check-jsonschema on the workflows (GitHub
-workflow schema) and the Dependabot files (Dependabot schema). It needs only
-[uv](https://docs.astral.sh/uv/) and `make`.
+pymarkdown, shellcheck on `scripts/` and `tests/`, the `pr-merge` tests
+(`tests/pr-merge-test.sh`, fake `gh` and `guard`, no network), and check-jsonschema on
+the workflows (GitHub workflow schema) and the Dependabot files (Dependabot schema).
+It needs only [uv](https://docs.astral.sh/uv/) and `make`. The `pr-merge` tests run
+locally through `make verify` only; no workflow runs them.
 
 ## License
 

@@ -1,5 +1,6 @@
 # Local checks for awkit-ci. Tools run through uvx at pinned versions; CI runs the
-# same tools via .github/workflows/docs-ci.yml (see self-ci.yml).
+# same tools via .github/workflows/docs-ci.yml (see self-ci.yml). The pr-merge tests
+# (`test`) run locally through `make verify` only; no workflow runs them.
 
 ACTIONLINT      := uvx --from actionlint-py==1.7.12.25 --with shellcheck-py==0.11.0.1 actionlint
 ZIZMOR          := uvx zizmor==1.31.1
@@ -11,9 +12,9 @@ TEMPLATE_WORKFLOWS := templates/ci.yml templates/pr-title.yml templates/scorecar
 DEPENDABOT_FILES   := .github/dependabot.yml templates/dependabot.yml templates/awkit-docs/dependabot.yml
 ZIZMOR_CONFIG      := .github/zizmor.yml
 
-.PHONY: verify actionlint zizmor mdlint shellcheck schemas
+.PHONY: verify actionlint zizmor mdlint shellcheck schemas test
 
-verify: actionlint zizmor mdlint shellcheck schemas
+verify: actionlint zizmor mdlint shellcheck schemas test
 
 actionlint:
 	$(ACTIONLINT) -color
@@ -26,7 +27,10 @@ mdlint:
 	$(PYMARKDOWN) --config .pymarkdown.json scan -r .
 
 shellcheck:
-	$(SHELLCHECK) scripts/pr-merge
+	$(SHELLCHECK) scripts/pr-merge tests/pr-merge-test.sh
+
+test:
+	tests/pr-merge-test.sh
 
 schemas:
 	$(CHECK_JSONSCHEMA) --builtin-schema vendor.github-workflows .github/workflows/*.yml $(TEMPLATE_WORKFLOWS)
