@@ -36,6 +36,7 @@ Called by the `ci` job of each Python repo.
 | Input | Type | Default | Meaning |
 |---|---|---|---|
 | `python-versions` | string (JSON array) | `'["3.12","3.13"]'` | Python versions for the `verify` matrix |
+| `verify-timeout-minutes` | number | `20` | Timeout in minutes for each `verify` job |
 | `link-excludes` | string (newline-separated regexes) | localhost and `https://github.com/agent-workflow-kit/` | Extra lychee excludes |
 
 No secrets. Jobs:
