@@ -10,10 +10,12 @@
 #      A configured guard that fails or is missing stops the merge (fail closed);
 #      with no guard installed at all, a warning is printed and the merge continues.
 #      Exception: if `guard pr` fails only because GitHub refuses to serve the diff
-#      (over 20,000 lines: "diff exceeded the maximum number of lines"), scan locally
-#      instead: fetch the PR head, run `guard range <merge-base>..<head>` (added lines
-#      and commit messages) and `guard text` on the title and body. This needs a local
-#      clone as the target; any finding or error still stops the merge. The fetched
+#      (HTTP 406 "diff exceeded the maximum number of lines": a PR that modifies existing
+#      files and exceeds GitHub's 20,000-line diff limit; the 300-file limit is not
+#      covered), scan locally instead: fetch the PR head, run
+#      `guard range <merge-base>..<head>` (added lines and commit messages) and
+#      `guard text` on the title and body. This needs a local clone as the target;
+#      any finding or error still stops the merge. The fetched
 #      head must equal the head gh reports, and the scan is per commit (the range
 #      is read with an empty work tree and index, so no checked-out file, such as a
 #      .gitattributes, changes what is scanned).
