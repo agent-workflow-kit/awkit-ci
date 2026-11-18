@@ -6,6 +6,10 @@ name: python-ci
 on:
   workflow_call:
     inputs:
+      verify-timeout-minutes:
+        description: Timeout in minutes for each verify job (matrix entry).
+        type: number
+        default: 20
       python-versions:
         description: JSON array of Python versions for the verify matrix.
         type: string
@@ -76,7 +80,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: ${{ inputs.verify-timeout-minutes }}
     permissions:
       contents: read
     strategy:
