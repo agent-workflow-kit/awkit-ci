@@ -21,12 +21,15 @@
 #      .gitattributes, changes what is scanned).
 #   3. Wait for all checks: `gh pr checks <pr> --watch --fail-fast`.
 #   4. Squash-merge: `gh pr merge <pr> --squash --match-head-commit <sha>` (never
-#      --admin, never --delete-branch: merging and cleanup are separate steps, so a
-#      zero exit means the merge happened). The merge only happens if the PR head is
-#      still the commit the guard checked. If gh exits non-zero anyway, the PR is
-#      re-read: MERGED with a merge commit and the head that was checked counts as
-#      merged (warning); anything else, or a failed re-read, is a failure and gh's
-#      output is shown, and nothing is deleted. Accepted race: if someone else merges
+#      --admin, never --delete-branch: merging and cleanup are separate steps). The
+#      merge only happens if the PR head is still the commit the guard checked. After
+#      the call the PR is always re-read (state, merge commit, head). If gh exited 0
+#      but the PR is not MERGED with a merge commit and the checked head (e.g. queued
+#      in a merge queue or set to auto-merge), or the re-read fails, a warning is
+#      printed, step 5 is skipped and the exit status stays 0. If gh exits non-zero,
+#      MERGED with a merge commit and the checked head counts as merged (warning);
+#      anything else, or a failed re-read, is a failure and gh's output is shown, and
+#      nothing is deleted. Accepted race: if someone else merges
 #      the same head between the guard and our merge, the re-read accepts it; the
 #      content is identical to the guarded content.
 #   5. Delete the remote head branch, as --delete-branch used to: `gh api -X DELETE
@@ -41,7 +44,9 @@
 #      commands here). Note for stacked PRs: deleting the head branch closes PRs based
 #      on it, so retarget children first.
 #
-# Exit status: 0 once the PR is merged (even if the branch could not be deleted); 1 on any failure; 2 on usage errors.
+# Exit status: 0 once the PR is merged (even if the branch could not be deleted, or if
+# the merge call returned 0 but the PR is not merged yet, e.g. queued); 1 on any
+# failure; 2 on usage errors.
 
 set -euo pipefail
 
@@ -188,22 +193,37 @@ gh pr checks "$pr" --repo "$repo" --watch --fail-fast ||
 
 # 4. Squash-merge, only if the head is unchanged since the guard ran.
 echo "$prog: squash-merging $repo#$pr"
-# No --delete-branch: the merge call does only the merge (branch cleanup is step 5), so
-# exit 0 means it happened. As defense in depth, on a non-zero exit re-read the PR and
-# accept only a PR that is MERGED, has a merge commit and whose head is the commit we
-# asked gh to merge. Anything else, including a failing re-read, is a failed merge.
+# No --delete-branch: the merge call does only the merge (branch cleanup is step 5). Exit
+# 0 can still mean "queued" (merge queue, auto-merge) with the PR open, so after every
+# call re-read the PR and accept only one that is MERGED, has a merge commit and whose
+# head is the commit we asked gh to merge. Anything else is a failed merge after a
+# non-zero exit, and a warning (no branch deletion, exit 0) after exit 0.
 merge_out=$(mktemp)
 # Everything printed from gh output is stripped of control characters first.
 sanitize() { LC_ALL=C tr -c '[:print:]\n\t' '?'; }
-if gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$head_sha" > "$merge_out" 2>&1; then
+do_delete=0
+merge_rc=0
+gh pr merge "$pr" --repo "$repo" --squash --match-head-commit "$head_sha" > "$merge_out" 2>&1 || merge_rc=$?
+if [ "$merge_rc" -eq 0 ]; then
   sanitize < "$merge_out"
 else
   sanitize < "$merge_out" >&2
-  # '|' separates the fields: unlike a tab, it does not collapse an empty merge commit.
-  view=$(gh pr view "$pr" --repo "$repo" --json state,mergeCommit,headRefOid \
-    --jq '[.state, (.mergeCommit.oid // ""), .headRefOid] | join("|")' 2> /dev/null) ||
+fi
+# '|' separates the fields: unlike a tab, it does not collapse an empty merge commit.
+view_ok=1
+view=$(gh pr view "$pr" --repo "$repo" --json state,mergeCommit,headRefOid \
+  --jq '[.state, (.mergeCommit.oid // ""), .headRefOid] | join("|")' 2> /dev/null) || view_ok=0
+view_state="" view_merge="" view_head=""
+[ "$view_ok" -eq 0 ] || IFS='|' read -r view_state view_merge view_head <<< "$view"
+if [ "$merge_rc" -eq 0 ]; then
+  if [ "$view_ok" -eq 1 ] && [ "$view_state" = "MERGED" ] && [ -n "$view_merge" ] && [ "$view_head" = "$head_sha" ]; then
+    do_delete=1
+  else
+    warn "merge call returned 0 but $repo#$pr is not merged (queued?) or its state could not be re-read; not deleting the head branch"
+  fi
+else
+  [ "$view_ok" -eq 1 ] ||
     die "merge failed for $repo#$pr and its state could not be re-read (see gh output above)"
-  IFS='|' read -r view_state view_merge view_head <<< "$view"
   if [ "$view_state" != "MERGED" ]; then
     die "merge failed for $repo#$pr (head changed since the guard ran, or merge not allowed; see gh output above)"
   fi
@@ -212,9 +232,10 @@ else
   [ "$view_head" = "$head_sha" ] ||
     die "gh pr merge failed for $repo#$pr and the PR is merged, but its head $view_head is not the commit $head_sha that was checked; not treating it as our merge"
   warn "gh pr merge exited non-zero after $repo#$pr was merged (merge commit $view_merge); treating the merge as done. gh said: $(sanitize < "$merge_out" | tr '\n' ' ')"
+  do_delete=1
 fi
 
-echo "$prog: merged $repo#$pr"
+[ "$do_delete" -eq 0 ] || echo "$prog: merged $repo#$pr"
 
 # 5. Delete the remote head branch. The merge is done, so nothing here may fail the run:
 # every problem is a warning and the exit status stays 0.
@@ -239,44 +260,47 @@ delete_head_branch() {
   info=$(gh pr view "$pr" --repo "$repo" --json isCrossRepository,baseRefName,headRefName \
     --jq '[(.isCrossRepository | tostring), .baseRefName, .headRefName] | join("\t")' 2> /dev/null) || info=""
   IFS=$'\t' read -r cross base head <<< "$info"
+  # Branch names are PR-controlled: print them sanitized only.
+  local shead
   if [ -z "$cross" ] || [ -z "$base" ] || [ -z "$head" ]; then
     warn "could not read the head branch of $repo#$pr; branch not deleted"
     return 0
   fi
+  shead=$(printf '%s' "$head" | sanitize)
   if [ "$cross" != "false" ]; then
-    echo "$prog: head branch '$head' is in another repository; not deleting it"
+    echo "$prog: head branch '$shead' is in another repository; not deleting it"
     return 0
   fi
   default=$(gh repo view "$repo" --json defaultBranchRef --jq .defaultBranchRef.name 2> /dev/null) || default=""
   if [ -z "$default" ]; then
-    warn "could not read the default branch of $repo; branch '$head' not deleted"
+    warn "could not read the default branch of $repo; branch '$shead' not deleted"
     return 0
   fi
   if [ "$head" = "$default" ] || [ "$head" = "$base" ]; then
-    echo "$prog: head branch '$head' is the default or base branch; not deleting it"
+    echo "$prog: head branch '$shead' is the default or base branch; not deleting it"
     return 0
   fi
   enc=$(percent_encode "$head")
   # Safe to leave in place if the protection lookup fails for any reason but 404.
   if ! prot=$(gh api "repos/$repo/branches/$enc" --jq .protected 2> "$delete_out"); then
     if grep -q 'HTTP 404' "$delete_out"; then
-      echo "$prog: head branch '$head' is already gone"
+      echo "$prog: head branch '$shead' is already gone"
     else
-      warn "could not check whether branch '$head' is protected; branch not deleted. gh said: $(sanitize < "$delete_out" | tr '\n' ' ')"
+      warn "could not check whether branch '$shead' is protected; branch not deleted. gh said: $(sanitize < "$delete_out" | tr '\n' ' ')"
     fi
     return 0
   fi
   if [ "$prot" != "false" ]; then
-    echo "$prog: head branch '$head' is protected; not deleting it"
+    echo "$prog: head branch '$shead' is protected; not deleting it"
     return 0
   fi
   if gh api -X DELETE "repos/$repo/git/refs/heads/$enc" > "$delete_out" 2>&1; then
-    echo "$prog: deleted branch $head"
+    echo "$prog: deleted branch $shead"
   elif grep -q 'HTTP 404' "$delete_out" ||
     { grep -q 'HTTP 422' "$delete_out" && grep -qi 'reference does not exist' "$delete_out"; }; then
-    echo "$prog: head branch '$head' is already gone"
+    echo "$prog: head branch '$shead' is already gone"
   else
-    warn "branch '$head' not deleted ($repo#$pr is merged). gh said: $(sanitize < "$delete_out" | tr '\n' ' ')"
+    warn "branch '$shead' not deleted ($repo#$pr is merged). gh said: $(sanitize < "$delete_out" | tr '\n' ' ')"
   fi
 }
-delete_head_branch
+[ "$do_delete" -eq 0 ] || delete_head_branch
