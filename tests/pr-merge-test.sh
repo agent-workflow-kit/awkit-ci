@@ -53,6 +53,11 @@ case "$1 $2" in
   "repo view") echo "owner/repo" ;;
   "pr view")
     case "$*" in
+      *mergeCommit*)
+        # Post-merge re-check: state, merge commit oid, head oid (tab-separated).
+        [ -z "${FAKE_VIEW_FAIL:-}" ] || exit 1
+        printf '%s\t%s\t%s\n' "${FAKE_VIEW_STATE-OPEN}" "${FAKE_VIEW_MERGE-}" "${FAKE_VIEW_HEAD-$FAKE_CURRENT_HEAD}"
+        ;;
       *headRefOid*) echo "$FAKE_HEAD" ;;
       *baseRefName*)
         [ -z "${FAKE_BASE_FAIL:-}" ] || exit 1
@@ -64,6 +69,13 @@ case "$1 $2" in
     ;;
   "pr checks") exit "${FAKE_CHECKS_RC:-0}" ;;
   "pr merge")
+    # FAKE_MERGE_RC_AFTER: merge, then exit non-zero like gh does when its branch
+    # cleanup fails (the merge itself has happened).
+    if [ -n "${FAKE_MERGE_RC_AFTER:-}" ]; then
+      echo "MERGED" >> "$FAKE_LOG"
+      echo "gh: HTTP 404: Reference does not exist (deleteRef)" >&2
+      exit "$FAKE_MERGE_RC_AFTER"
+    fi
     # Refuse like GitHub does when the head moved.
     case "$*" in
       *"--match-head-commit $FAKE_CURRENT_HEAD"*) echo "MERGED" >> "$FAKE_LOG" ;;
@@ -316,6 +328,40 @@ check "relative TMPDIR: exit 0" rc_is 0
 check "relative TMPDIR: scan isolated" range_isolated
 check "relative TMPDIR: worktree path absolute" abs_scan_paths
 check "relative TMPDIR: scan saw the commits" logged "range-saw-added"
+
+# 18. gh pr merge exits non-zero: only a PR that is MERGED with our head counts as merged.
+merged_view="FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123"
+# shellcheck disable=SC2086 # intentional word splitting of the VAR=value list
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 $merged_view
+check "merged anyway: exit 0" rc_is 0
+check "merged anyway: merge attempted once" logged MERGED
+check "merged anyway: re-checked the PR" logged "pr view 7 --repo owner/repo --json state,mergeCommit,headRefOid"
+check "merged anyway: warns" said "warning: .*merged"
+check "merged anyway: shows gh output" said "HTTP 404"
+check "merged anyway: reports merged" said "pr-merge: merged owner/repo#7"
+run "$work/clone" FAKE_GUARD_PR=toolarge FAKE_MERGE_RC_AFTER=1 $merged_view
+check "merged anyway (fallback): exit 0" rc_is 0
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=OPEN
+check "merge failed, PR open: exit 1" rc_is 1
+check "merge failed, PR open: error" said "error: merge failed"
+check "merge failed, PR open: shows gh output" said "HTTP 404"
+check "merge failed, PR open: no success line" not said "pr-merge: merged"
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=CLOSED
+check "merge failed, PR closed: exit 1" rc_is 1
+# shellcheck disable=SC2086
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 $merged_view FAKE_VIEW_HEAD=1111111111111111111111111111111111111111
+check "merged with other head: exit 1" rc_is 1
+check "merged with other head: not ours" said "not the commit"
+check "merged with other head: no success line" not said "pr-merge: merged"
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=
+check "merged without merge commit: exit 1" rc_is 1
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_FAIL=1
+check "view fails: exit 1" rc_is 1
+check "view fails: shows gh output" said "HTTP 404"
+run "$work/clone" FAKE_CURRENT_HEAD=0000000000000000000000000000000000000000 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123
+check "refused merge, PR looks merged with other head: exit 1" rc_is 1
+run "$work/clone"
+check "clean merge: no re-check" not_logged "mergeCommit"
 
 # 11. Usage errors keep exit status 2.
 env PATH="$work/bin:$PATH" "$script" > "$out" 2>&1
