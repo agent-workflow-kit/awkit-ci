@@ -223,9 +223,12 @@ scripts/pr-merge <repo-dir | owner/repo> <pr-number>
    If gh exits non-zero after merging (for example HTTP 404 deleting a head branch that
    GitHub already deleted), the PR is re-read: state MERGED with a merge commit and the
    head that was checked counts as merged (warning, exit 0). Any other state, a different
-   head, or a failed re-read is a failure, and gh's output is shown.
+   head, or a failed re-read is a failure, and gh's output is shown. Accepted race: if
+   someone else merges the same head between the guard and the merge, the re-read
+   accepts it; the content is identical to the guarded content.
 
-It exits 0 after merging, 1 on any failure, 2 on usage errors. It needs `gh`,
+It exits 0 once the PR is merged (also when gh failed only in cleanup, with a
+warning), 1 on any failure, 2 on usage errors. It needs `gh`,
 authenticated with permission to merge.
 
 ## Local checks

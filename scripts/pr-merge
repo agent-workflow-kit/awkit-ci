@@ -26,9 +26,11 @@
 #      cleanup failed, e.g. HTTP 404 because GitHub already deleted the branch), the PR
 #      is re-read: MERGED with a merge commit and the head that was checked counts as
 #      merged (warning, exit 0); anything else, or a failed re-read, is a failure and
-#      gh's output is shown.
+#      gh's output is shown. Accepted race: if someone else merges the same head between
+#      the guard and our merge, the re-read accepts it; the content is identical to
+#      the guarded content.
 #
-# Exit status: 0 on merge; 1 on any failure; 2 on usage errors.
+# Exit status: 0 once the PR is merged; 1 on any failure; 2 on usage errors.
 
 set -euo pipefail
 
@@ -67,6 +69,7 @@ fi
 
 head_sha=$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid) ||
   die "could not read PR #$pr in $repo"
+[ -n "$head_sha" ] || die "PR #$pr in $repo reports an empty head commit; not merging"
 echo "$prog: $repo#$pr at ${head_sha}"
 
 guard_out=""
@@ -180,20 +183,25 @@ echo "$prog: squash-merging $repo#$pr"
 # only a PR that is MERGED, has a merge commit and whose head is the commit we asked
 # gh to merge. Anything else, including a failing re-read, is a failed merge.
 merge_out=$(mktemp)
+# Everything printed from gh output is stripped of control characters first.
+sanitize() { LC_ALL=C tr -c '[:print:]\n\t' '?'; }
 if gh pr merge "$pr" --repo "$repo" --squash --delete-branch --match-head-commit "$head_sha" > "$merge_out" 2>&1; then
-  cat "$merge_out" >&2
+  sanitize < "$merge_out"
 else
-  cat "$merge_out" >&2
+  sanitize < "$merge_out" >&2
+  # '|' separates the fields: unlike a tab, it does not collapse an empty merge commit.
   view=$(gh pr view "$pr" --repo "$repo" --json state,mergeCommit,headRefOid \
-    --jq '[.state, (.mergeCommit.oid // ""), .headRefOid] | @tsv' 2> /dev/null) ||
+    --jq '[.state, (.mergeCommit.oid // ""), .headRefOid] | join("|")' 2> /dev/null) ||
     die "merge failed for $repo#$pr and its state could not be re-read (see gh output above)"
-  IFS=$'\t' read -r view_state view_merge view_head <<< "$view"
-  if [ "$view_state" != "MERGED" ] || [ -z "$view_merge" ]; then
+  IFS='|' read -r view_state view_merge view_head <<< "$view"
+  if [ "$view_state" != "MERGED" ]; then
     die "merge failed for $repo#$pr (head changed since the guard ran, or merge not allowed; see gh output above)"
   fi
+  [ -n "$view_merge" ] ||
+    die "gh pr merge failed for $repo#$pr and the PR is MERGED but has no merge commit; not treating it as our merge"
   [ "$view_head" = "$head_sha" ] ||
     die "gh pr merge failed for $repo#$pr and the PR is merged, but its head $view_head is not the commit $head_sha that was checked; not treating it as our merge"
-  warn "gh pr merge exited non-zero after $repo#$pr was merged (merge commit $view_merge); treating the merge as done. gh said: $(tr '\n' ' ' < "$merge_out")"
+  warn "gh pr merge exited non-zero after $repo#$pr was merged (merge commit $view_merge); treating the merge as done. gh said: $(sanitize < "$merge_out" | tr '\n' ' ')"
 fi
 
 echo "$prog: merged $repo#$pr"
