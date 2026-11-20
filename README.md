@@ -220,6 +220,10 @@ scripts/pr-merge <repo-dir | owner/repo> <pr-number>
 3. Waits for every check: `gh pr checks <pr> --watch --fail-fast`.
 4. Squash-merges and deletes the branch: `gh pr merge <pr> --squash --delete-branch`,
    only if the PR head is still the commit the guard checked. It never uses `--admin`.
+   If gh exits non-zero after merging (for example HTTP 404 deleting a head branch that
+   GitHub already deleted), the PR is re-read: state MERGED with a merge commit and the
+   head that was checked counts as merged (warning, exit 0). Any other state, a different
+   head, or a failed re-read is a failure, and gh's output is shown.
 
 It exits 0 after merging, 1 on any failure, 2 on usage errors. It needs `gh`,
 authenticated with permission to merge.

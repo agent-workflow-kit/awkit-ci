@@ -172,6 +172,7 @@ check() { # check <name> <condition-command...>
 logged() { grep -q -- "$1" "$FAKE_LOG"; }
 not_logged() { ! grep -q -- "$1" "$FAKE_LOG"; }
 said() { grep -q -- "$1" "$out"; }
+not_said() { ! grep -q -- "$1" "$out"; }
 rc_is() { [ "$rc" -eq "$1" ]; }
 logval() { sed -n "s/^$1 //p" "$FAKE_LOG" | head -n 1; }
 # The range scan ran in an empty temp dir used as work tree and index home, and the
@@ -330,29 +331,26 @@ check "relative TMPDIR: worktree path absolute" abs_scan_paths
 check "relative TMPDIR: scan saw the commits" logged "range-saw-added"
 
 # 18. gh pr merge exits non-zero: only a PR that is MERGED with our head counts as merged.
-merged_view="FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123"
-# shellcheck disable=SC2086 # intentional word splitting of the VAR=value list
-run "$work/clone" FAKE_MERGE_RC_AFTER=1 $merged_view
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123
 check "merged anyway: exit 0" rc_is 0
 check "merged anyway: merge attempted once" logged MERGED
 check "merged anyway: re-checked the PR" logged "pr view 7 --repo owner/repo --json state,mergeCommit,headRefOid"
 check "merged anyway: warns" said "warning: .*merged"
 check "merged anyway: shows gh output" said "HTTP 404"
 check "merged anyway: reports merged" said "pr-merge: merged owner/repo#7"
-run "$work/clone" FAKE_GUARD_PR=toolarge FAKE_MERGE_RC_AFTER=1 $merged_view
+run "$work/clone" FAKE_GUARD_PR=toolarge FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123
 check "merged anyway (fallback): exit 0" rc_is 0
 run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=OPEN
 check "merge failed, PR open: exit 1" rc_is 1
 check "merge failed, PR open: error" said "error: merge failed"
 check "merge failed, PR open: shows gh output" said "HTTP 404"
-check "merge failed, PR open: no success line" not said "pr-merge: merged"
+check "merge failed, PR open: no success line" not_said "pr-merge: merged"
 run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=CLOSED
 check "merge failed, PR closed: exit 1" rc_is 1
-# shellcheck disable=SC2086
-run "$work/clone" FAKE_MERGE_RC_AFTER=1 $merged_view FAKE_VIEW_HEAD=1111111111111111111111111111111111111111
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123 FAKE_VIEW_HEAD=1111111111111111111111111111111111111111
 check "merged with other head: exit 1" rc_is 1
 check "merged with other head: not ours" said "not the commit"
-check "merged with other head: no success line" not said "pr-merge: merged"
+check "merged with other head: no success line" not_said "pr-merge: merged"
 run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=
 check "merged without merge commit: exit 1" rc_is 1
 run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_FAIL=1
