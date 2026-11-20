@@ -218,18 +218,41 @@ scripts/pr-merge <repo-dir | owner/repo> <pr-number>
    `owner/repo` it refuses), and the fetched head must be the commit gh reports. Any
    finding or other error still stops the merge, and the output says which route ran.
 3. Waits for every check: `gh pr checks <pr> --watch --fail-fast`.
-4. Squash-merges and deletes the branch: `gh pr merge <pr> --squash --delete-branch`,
-   only if the PR head is still the commit the guard checked. It never uses `--admin`.
-   If gh exits non-zero after merging (for example HTTP 404 deleting a head branch that
-   GitHub already deleted), the PR is re-read: state MERGED with a merge commit and the
-   head that was checked counts as merged (warning, exit 0). Any other state, a different
-   head, or a failed re-read is a failure, and gh's output is shown. Accepted race: if
-   someone else merges the same head between the guard and the merge, the re-read
-   accepts it; the content is identical to the guarded content.
+4. Squash-merges: `gh pr merge <pr> --squash --match-head-commit <sha>`, only if the PR
+   head is still the commit the guard checked. It never uses `--admin` or
+   `--delete-branch`: merging and cleanup are separate. After the call the PR is always
+   re-read. If gh exited 0 but the PR is not MERGED with a merge commit and the head
+   that was checked (for example it is queued in a merge queue or set to auto-merge),
+   or the re-read fails, a warning is printed, no branch is deleted and the exit status
+   stays 0. If gh exits non-zero, state MERGED with a merge commit and the head that
+   was checked counts as merged (warning). Any other state, a different head, or a
+   failed re-read is a failure, gh's output is shown, and no branch is deleted. Accepted race: if someone else merges the same head between the
+   guard and the merge, the re-read accepts it; the content is identical to the
+   guarded content.
+5. Deletes the remote head branch with
+   `gh api -X DELETE repos/<owner>/<repo>/git/refs/heads/<branch>` (the ref is
+   percent-encoded; slashes stay). It only does so for a PR from the same repository
+   (never a fork's branch) and never for the default branch, the base branch or a
+   protected branch. HTTP 404, and 422 "Reference does not exist", mean the branch is
+   already gone (for example through the repository's delete-branch-on-merge setting)
+   and count as success. Any other failure, or a lookup that cannot decide whether
+   deleting is safe, prints a warning and the exit status stays 0: the merge is done.
+   Local branches are left alone: unlike gh's `--delete-branch`, which also switches to
+   the base branch and deletes the local head branch, `pr-merge` runs no local git
+   commands after the merge. Deleting the head branch closes pull requests based on it,
+   so for stacked PRs retarget the children first.
 
-It exits 0 once the PR is merged (also when gh failed only in cleanup, with a
-warning), 1 on any failure, 2 on usage errors. It needs `gh`,
-authenticated with permission to merge.
+It exits 0 once the PR is merged (also with a warning when the merge call exited
+non-zero but the PR re-reads as merged, or when the head branch could not be deleted),
+and with a warning when the merge call exited 0 but the PR is not merged yet (queued).
+It exits 1 on any failure and 2 on usage errors. It needs `gh`, authenticated with
+permission to merge.
+
+Accepted risks of the branch deletion: there is no check that the branch still points
+at the merged head before the DELETE (a window of seconds, the same exposure as gh's
+old `--delete-branch`; the DELETE cannot be made conditional). An HTTP 404 on the
+DELETE is reported as "already gone", which also covers a token without write access
+to the branch.
 
 ## Local checks
 

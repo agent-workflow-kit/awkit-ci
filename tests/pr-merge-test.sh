@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests for scripts/pr-merge, using fake `gh` and `guard` executables on a temp PATH.
-# Never talks to GitHub and never merges anything: the fake `gh pr merge` only logs.
+# Never talks to GitHub and never merges or deletes anything: the fake `gh pr merge` and
+# the fake `gh api -X DELETE` only log (and return canned statuses).
 #
 # Usage: tests/pr-merge-test.sh
 set -uo pipefail
@@ -55,9 +56,69 @@ cat > "$work/bin/gh" << 'FAKE'
 # Fake gh. Behavior is driven by FAKE_* environment variables; calls are logged.
 echo "gh $*" >> "$FAKE_LOG"
 case "$1 $2" in
-  "repo view") echo "owner/repo" ;;
+  "repo view")
+    case "$*" in
+      *defaultBranchRef*)
+        [ -z "${FAKE_DEFAULT_FAIL:-}" ] || exit 1
+        echo "${FAKE_DEFAULT-main}"
+        ;;
+      *) echo "owner/repo" ;;
+    esac
+    ;;
+  "api "*)
+    # Branch cleanup: GET repos/<r>/branches/<b> (protection) and
+    # DELETE repos/<r>/git/refs/heads/<b>. FAKE_PROTECTED: true | false.
+    # FAKE_PROTECT_FAIL: HTTP status for a failing protection lookup.
+    # FAKE_DELETE_STATUS: 204 (default) | 404 | 422 | 422-other | 403 | 500.
+    case "$*" in
+      *"-X DELETE"*)
+        echo "DELETE-CALL" >> "$FAKE_LOG"
+        case "${FAKE_DELETE_STATUS:-204}" in
+          204) exit 0 ;;
+          404)
+            echo '{"message":"Not Found"}'
+            echo "gh: Not Found (HTTP 404)" >&2
+            ;;
+          422)
+            echo '{"message":"Reference does not exist"}'
+            echo "gh: Reference does not exist (HTTP 422)" >&2
+            ;;
+          422-other)
+            echo '{"message":"Cannot delete this branch"}'
+            echo "gh: Cannot delete this branch (HTTP 422)" >&2
+            ;;
+          *)
+            echo "{\"message\":\"boom\"}"
+            [ -z "${FAKE_ESC:-}" ] || printf 'evil\033[31mred\rover\n'
+            echo "gh: boom (HTTP $FAKE_DELETE_STATUS)" >&2
+            ;;
+        esac
+        exit 1
+        ;;
+      *)
+        if [ -n "${FAKE_PROTECT_FAIL:-}" ]; then
+          echo "gh: lookup failed (HTTP $FAKE_PROTECT_FAIL)" >&2
+          exit 1
+        fi
+        echo "${FAKE_PROTECTED-false}"
+        ;;
+    esac
+    ;;
   "pr view")
     case "$*" in
+      *isCrossRepository*)
+        # Branch-cleanup lookup: canned JSON run through the script's own --jq expression.
+        [ -z "${FAKE_INFO_FAIL:-}" ] || exit 1
+        expr="" prev=""
+        for a in "$@"; do
+          [ "$prev" != "--jq" ] || expr=$a
+          prev=$a
+        done
+        jq -n --argjson c "${FAKE_CROSS-false}" --arg b "${FAKE_PR_BASE-main}" \
+          --arg h "${FAKE_PR_HEAD-feature}" \
+          '{isCrossRepository: $c, baseRefName: $b, headRefName: $h}' |
+          jq -r "$expr"
+        ;;
       *mergeCommit*)
         # Post-merge re-check: canned JSON run through the script's own --jq expression.
         [ -z "${FAKE_VIEW_FAIL:-}" ] || exit 1
@@ -167,10 +228,12 @@ run() {
     if [ -n "${RUN_ERR:-}" ]; then
       env PATH="$work/bin:$PATH" AWKIT_GUARD="$work/bin/guard" \
         FAKE_HEAD="$head_sha" FAKE_CURRENT_HEAD="$head_sha" \
+        FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123 \
         "$@" "$script" "$target" 7 > "$out" 2> "$RUN_ERR"
     else
       env PATH="$work/bin:$PATH" AWKIT_GUARD="$work/bin/guard" \
         FAKE_HEAD="$head_sha" FAKE_CURRENT_HEAD="$head_sha" \
+        FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123 \
         "$@" "$script" "$target" 7 > "$out" 2>&1
     fi
   )
@@ -388,7 +451,7 @@ check "closed with merge commit: merge failed" said "error: merge failed"
 run "$work/clone" FAKE_HEAD=
 check "empty head: exit 1" rc_is 1
 check "empty head: no merge attempt" not_logged "pr merge"
-run "$work/clone" FAKE_GUARD_PR=toolarge FAKE_CURRENT_HEAD=0000000000000000000000000000000000000000
+run "$work/clone" FAKE_GUARD_PR=toolarge FAKE_CURRENT_HEAD=0000000000000000000000000000000000000000 FAKE_VIEW_STATE=OPEN
 check "fallback, merge refused, PR open: exit 1" rc_is 1
 check "fallback, merge refused, PR open: merge failed" said "error: merge failed"
 run "$work/clone" FAKE_GUARD_PR=toolarge FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123 FAKE_VIEW_HEAD=1111111111111111111111111111111111111111
@@ -407,13 +470,175 @@ check "view fails: shows gh output" said "HTTP 404"
 run "$work/clone" FAKE_CURRENT_HEAD=0000000000000000000000000000000000000000 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123
 check "refused merge, PR looks merged with other head: exit 1" rc_is 1
 run "$work/clone"
-check "clean merge: no re-check" not_logged "mergeCommit"
 check "clean merge: never --admin" not_logged "--admin"
-check "clean merge: squash, delete, match head" logged "pr merge 7 --repo owner/repo --squash --delete-branch --match-head-commit $head_sha"
+check "clean merge: squash and match head, no --delete-branch" logged "pr merge 7 --repo owner/repo --squash --match-head-commit $head_sha"
 RUN_ERR=/dev/null run "$work/clone"
 check "clean merge: gh stdout stays on stdout" said "gh-merge-stdout"
 run "$work/clone" FAKE_ESC=1
 check "clean merge: output sanitized" not_said "$(printf '\033')"
+
+# 19. Branch cleanup is a separate step after the merge (issue 11).
+del_calls() { [ "$(grep -c '^DELETE-CALL$' "$FAKE_LOG")" -eq "$1" ]; }
+del_url() { logged "^gh api -X DELETE repos/owner/repo/git/refs/heads/$1\$"; }
+ordered() { # ordered <first> <second>: first logged line precedes second
+  local a b
+  a=$(grep -n -- "$1" "$FAKE_LOG" | head -n 1 | cut -d: -f1)
+  b=$(grep -n -- "$2" "$FAKE_LOG" | head -n 1 | cut -d: -f1)
+  [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]
+}
+
+run "$work/clone"
+check "delete 204: exit 0" rc_is 0
+check "delete 204: deleted once" del_calls 1
+check "delete 204: URL" del_url feature
+check "delete 204: after the merge" ordered "pr merge" "api -X DELETE"
+check "delete 204: no warning" not_said "warning"
+check "delete 204: reports merged" said "pr-merge: merged owner/repo#7"
+check "delete 204: names the deleted branch" said "deleted branch feature"
+
+run "$work/clone" FAKE_DELETE_STATUS=404
+check "delete 404: exit 0" rc_is 0
+check "delete 404: attempted once" del_calls 1
+check "delete 404: not a warning" not_said "warning"
+check "delete 404: reports merged" said "pr-merge: merged owner/repo#7"
+
+run "$work/clone" FAKE_DELETE_STATUS=422
+check "delete 422 does not exist: exit 0" rc_is 0
+check "delete 422 does not exist: not a warning" not_said "warning"
+run "$work/clone" FAKE_DELETE_STATUS=422-other
+check "delete 422 other: exit 0" rc_is 0
+check "delete 422 other: warns" said "warning: .*not deleted"
+check "delete 422 other: shows gh output" said "Cannot delete this branch"
+
+for st in 403 500; do
+  run "$work/clone" FAKE_DELETE_STATUS=$st
+  check "delete $st: exit 0" rc_is 0
+  check "delete $st: warns" said "warning: .*feature"
+  check "delete $st: shows gh output" said "HTTP $st"
+  check "delete $st: merge still reported" said "pr-merge: merged owner/repo#7"
+done
+run "$work/clone" FAKE_DELETE_STATUS=500 FAKE_ESC=1
+check "delete failure output: no ESC byte" not_said "$(printf '\033')"
+check "delete failure output: no CR byte" not_said "$(printf '\r')"
+
+# Fork PR, default branch, base branch, protected branch: never deleted.
+run "$work/clone" FAKE_CROSS=true
+check "fork: exit 0" rc_is 0
+check "fork: no delete" del_calls 0
+check "fork: no protection lookup" not_logged "api "
+check "fork: reports merged" said "pr-merge: merged owner/repo#7"
+run "$work/clone" FAKE_PR_HEAD=main
+check "head is the default branch: exit 0" rc_is 0
+check "head is the default branch: no delete" del_calls 0
+run "$work/clone" FAKE_PR_HEAD=develop FAKE_PR_BASE=develop FAKE_DEFAULT=main
+check "head is the base branch: exit 0" rc_is 0
+check "head is the base branch: no delete" del_calls 0
+run "$work/clone" FAKE_PR_HEAD=main FAKE_PR_BASE=develop FAKE_DEFAULT=main
+check "head is the default, base differs: exit 0" rc_is 0
+check "head is the default, base differs: no delete" del_calls 0
+run "$work/clone" FAKE_PROTECTED=true
+check "protected: exit 0" rc_is 0
+check "protected: no delete" del_calls 0
+check "protected: says so" said "protected"
+run "$work/clone" FAKE_PROTECT_FAIL=500
+check "protection lookup fails: exit 0" rc_is 0
+check "protection lookup fails: no delete" del_calls 0
+check "protection lookup fails: warns" said "warning: .*not deleted"
+run "$work/clone" FAKE_PROTECT_FAIL=404
+check "protection lookup 404 (branch gone): exit 0" rc_is 0
+check "protection lookup 404 (branch gone): no delete" del_calls 0
+check "protection lookup 404 (branch gone): not a warning" not_said "warning"
+run "$work/clone" FAKE_DEFAULT_FAIL=1
+check "default branch unreadable: exit 0" rc_is 0
+check "default branch unreadable: no delete" del_calls 0
+check "default branch unreadable: warns" said "warning: .*not deleted"
+run "$work/clone" FAKE_INFO_FAIL=1
+check "branch info unreadable: exit 0" rc_is 0
+check "branch info unreadable: no delete" del_calls 0
+check "branch info unreadable: warns" said "warning: .*not deleted"
+run "$work/clone" FAKE_PR_HEAD=
+check "empty head branch name: exit 0" rc_is 0
+check "empty head branch name: no delete" del_calls 0
+
+# Branch names: slashes stay, other special characters are percent-encoded.
+run "$work/clone" FAKE_PR_HEAD="feat/sub/x"
+check "slash branch: deleted" del_calls 1
+check "slash branch: slashes kept" del_url "feat/sub/x"
+run "$work/clone" FAKE_PR_HEAD="we ird#q?x%y+z&=@:é"
+check "special branch: deleted" del_calls 1
+check "special branch: encoded" del_url "we%20ird%23q%3Fx%25y%2Bz%26%3D%40%3A%C3%A9"
+check "special branch: protection lookup encoded" logged "^gh api repos/owner/repo/branches/we%20ird%23q%3Fx%25y%2Bz%26%3D%40%3A%C3%A9 "
+run "$work/clone" FAKE_PR_HEAD="a.b_c-d~e/1.0"
+check "safe characters: kept" del_url "a.b_c-d~e/1.0"
+run "$work/clone" FAKE_PR_HEAD="x|y"
+check "pipe branch: encoded" del_url "x%7Cy"
+
+# Merge exits non-zero but the PR is merged: accepted, and the delete step still runs.
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123
+check "merged anyway: delete runs" del_calls 1
+check "merged anyway: delete after merge" ordered "pr merge" "api -X DELETE"
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123 FAKE_DELETE_STATUS=500
+check "merged anyway, delete fails: exit 0" rc_is 0
+# Merge not done: nothing is deleted.
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=OPEN
+check "merge failed, open: no delete" del_calls 0
+check "merge failed, open: no cleanup lookups" not_logged "isCrossRepository"
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123 FAKE_VIEW_HEAD=1111111111111111111111111111111111111111
+check "merged with other head: no delete" del_calls 0
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=
+check "merged without merge commit: no delete" del_calls 0
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_FAIL=1
+check "view fails: no delete" del_calls 0
+run "$work/clone" FAKE_CURRENT_HEAD=0000000000000000000000000000000000000000
+check "head moved: no delete" del_calls 0
+run "$work/clone" FAKE_GUARD_PR=toolarge FAKE_CURRENT_HEAD=0000000000000000000000000000000000000000
+check "head moved (fallback): no delete" del_calls 0
+run "$work/clone" FAKE_CHECKS_RC=1
+check "checks fail: no delete" del_calls 0
+run "$work/clone" FAKE_GUARD_PR=other
+check "guard fails: no delete" del_calls 0
+run "$work/clone" FAKE_GUARD_PR=toolarge
+check "fallback clean merge: delete runs once" del_calls 1
+
+# The merge call exited 0 but the PR may be queued (merge queue / auto-merge): re-read
+# before deleting anything.
+run "$work/clone" FAKE_VIEW_STATE=OPEN
+check "queued (exit 0, PR open): exit 0" rc_is 0
+check "queued: no delete" del_calls 0
+check "queued: no cleanup lookups" not_logged "isCrossRepository"
+check "queued: warns" said "warning: .*not merged (queued?)"
+check "queued: no merged line" not_said "pr-merge: merged"
+run "$work/clone" FAKE_VIEW_FAIL=1
+check "exit 0, re-read fails: exit 0" rc_is 0
+check "exit 0, re-read fails: no delete" del_calls 0
+check "exit 0, re-read fails: warns" said "warning"
+run "$work/clone" FAKE_VIEW_MERGE=
+check "exit 0, merged without merge commit: no delete" del_calls 0
+run "$work/clone" FAKE_VIEW_HEAD=1111111111111111111111111111111111111111
+check "exit 0, merged with other head: no delete" del_calls 0
+check "exit 0, merged with other head: exit 0" rc_is 0
+run "$work/clone"
+check "clean merge: re-read after the merge call" ordered "pr merge" "mergeCommit"
+
+# Branch names printed are sanitized (a C1 control character, U+009B).
+run "$work/clone" FAKE_PR_HEAD="$(printf 'a\xc2\x9bb')"
+check "C1 in branch name: exit 0" rc_is 0
+check "C1 in branch name: not printed raw" not_said "$(printf '\xc2\x9b')"
+run "$work/clone" FAKE_PR_HEAD="$(printf 'a\xc2\x9bb')" FAKE_DELETE_STATUS=500
+check "C1 in branch name (delete fails): not printed raw" not_said "$(printf '\xc2\x9b')"
+run "$work/clone" FAKE_PR_HEAD="$(printf 'a\xc2\x9bb')" FAKE_PROTECTED=true
+check "C1 in branch name (protected): not printed raw" not_said "$(printf '\xc2\x9b')"
+
+# Never --delete-branch or --admin, in any scenario.
+run "$work/clone"
+check "no --delete-branch (clean)" not_logged "--delete-branch"
+check "no -d flag (clean)" not_logged "pr merge .* -d"
+run "$work/clone" FAKE_MERGE_RC_AFTER=1 FAKE_VIEW_STATE=MERGED FAKE_VIEW_MERGE=abc123
+check "no --delete-branch (merged anyway)" not_logged "--delete-branch"
+check "no --admin (merged anyway)" not_logged "--admin"
+run "$work/clone" FAKE_GUARD_PR=toolarge FAKE_CROSS=true
+check "no --delete-branch (fallback, fork)" not_logged "--delete-branch"
+check "no --admin (fallback, fork)" not_logged "--admin"
 
 # 11. Usage errors keep exit status 2.
 env PATH="$work/bin:$PATH" "$script" > "$out" 2>&1
