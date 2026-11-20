@@ -164,9 +164,15 @@ run() {
   rm -f "$FAKE_TEXT_OUT"
   (
     cd "${RUN_CWD:-.}" || exit 99
-    env PATH="$work/bin:$PATH" AWKIT_GUARD="$work/bin/guard" \
-      FAKE_HEAD="$head_sha" FAKE_CURRENT_HEAD="$head_sha" \
-      "$@" "$script" "$target" 7 > "$out" 2> "${RUN_ERR:-/dev/stdout}"
+    if [ -n "${RUN_ERR:-}" ]; then
+      env PATH="$work/bin:$PATH" AWKIT_GUARD="$work/bin/guard" \
+        FAKE_HEAD="$head_sha" FAKE_CURRENT_HEAD="$head_sha" \
+        "$@" "$script" "$target" 7 > "$out" 2> "$RUN_ERR"
+    else
+      env PATH="$work/bin:$PATH" AWKIT_GUARD="$work/bin/guard" \
+        FAKE_HEAD="$head_sha" FAKE_CURRENT_HEAD="$head_sha" \
+        "$@" "$script" "$target" 7 > "$out" 2>&1
+    fi
   )
   rc=$?
 }
