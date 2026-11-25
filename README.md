@@ -72,7 +72,10 @@ shell scripts under `scripts/`), `workflow-lint`, and `ci-ok`.
 No inputs, no secrets. Job `pr-title` runs `amannn/action-semantic-pull-request` with
 types `feat, fix, perf, chore, refactor, build, docs, test, ci, style`,
 `requireScope: false` and `wip: false`. It only reads the PR title through the API and
-never checks out PR code, so callers can safely trigger it with `pull_request_target`.
+never checks out PR code, so callers trigger it with `pull_request` (types `opened, edited,
+reopened, synchronize`; fork PRs get a read-only token, which is enough, and their check
+starts after the normal fork-approval step). `pull_request_target` is blocked by GitHub's
+default Actions event policy from 2026-12-02 and must not be used.
 
 ### release.yml
 
