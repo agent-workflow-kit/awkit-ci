@@ -129,7 +129,7 @@ Copy these from `templates/` into each repo unchanged (except where noted):
 | `.pymarkdown.json` | `.pymarkdown.json` | every repo |
 
 Callers reference the reusable workflows by release tag, for example
-`uses: agent-workflow-kit/awkit-ci/.github/workflows/python-ci.yml@v0.1.0`.
+`uses: agent-workflow-kit/awkit-ci/.github/workflows/python-ci.yml@v0.2.3`.
 
 The `ci` caller runs on every pull request and on pushes to `main`. A newer push to a
 PR cancels the older run; runs on `main` are never cancelled. Its `release` job needs
