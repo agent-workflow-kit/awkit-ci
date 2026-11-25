@@ -50,7 +50,7 @@ jobs:
           # code=true unless every changed file is *.md or under docs/.
           files=""
           case "$EVENT_NAME" in
-            pull_request|pull_request_target)
+            pull_request)
               # HEAD is the PR merge commit; its first parent is the base tip.
               files=$(git diff --name-only HEAD^1 HEAD) || files=""
               ;;
